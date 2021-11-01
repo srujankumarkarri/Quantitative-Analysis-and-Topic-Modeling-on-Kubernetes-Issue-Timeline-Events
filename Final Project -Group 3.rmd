@@ -1,0 +1,421 @@
+---
+title: "Final Project Report - Kubernetes"
+author: "Group 3"
+date: "10/3/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Quantitative Analysis and Topic Modeling on Kubernetes Issue Timeline Events
+
+## Team Members
+- Rohit Chamarthi
+- Srujan Kumar Karri
+- Adista Nursani
+- Helen Nguyen
+
+## Problem description
+Kubernetes is an open-source software used by many developers around the world since 2014. Since it is open-source, there are many contributors involved and numerous problems are bound to occur. Therefore it is important to identify prevalent problems. Using quantitative analysis on textual data of issues and comments will help the Kubernetes developers specify what topics to repair and upgrade.
+
+We will determine dominant issues on Kubernetes based on issue titles. We will analyze the corresponding issue comments/body to find which features can be improved.
+
+## URL link to download the zip file of data you used in the project
+Link: https://drive.google.com/drive/folders/13AZs_snL_PioT620SJR2U8yebi3MmECW?usp=sharing
+
+## Loading Libraries
+```{r message=FALSE, warning = FALSE}
+library(ggplot2) 
+library(readr) 
+library(dplyr)
+library(tidyr)
+library(igraph)
+library(tidytext)
+library(stringr)
+library(broom)
+library(scales)
+library(purrr)
+library(kableExtra)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(RColorBrewer)
+library(qdapDictionaries)
+library(lubridate)
+library(ggthemes)
+library(ggraph)
+library(widyr)
+library(gridExtra)
+library(gtable)
+library(tidyverse)
+library(quanteda)
+library(quanteda.textmodels)
+library(quanteda.textstats)
+library(quanteda.textplots)
+library(textrank)
+library(readtext)
+library(udpipe)
+library(kableExtra)
+library(concaveman)  
+library(ggraph)
+library(textplot)
+quanteda_options(threads = 4)
+```
+
+## Data summary, exploration, and discussion
+- Primary Dataset: kubernetes_timeline
+- Secondary Dataset: Obtained via GitHub API to get the titles of the issues. We saved the data in a csv file name 'issues_df'.
+Firstly, we will analyze to secondary dataset to identify the most popular/dominant issues. Then, we keep only comments relating to those popular issues. 
+
+```{r message=FALSE, warning = FALSE}
+# load the secondary dataset from the csv file
+issues_df <- readtext("issues_df.csv",
+                      text_field = "title", docid_field = "id")
+issues_df$created_at <- as.Date(issues_df$created_at)
+issues_df$year = year(issues_df$created_at)
+issues_df <- issues_df %>%
+  rename(issue_id = number)
+glimpse(issues_df)
+```
+
+```{r message=FALSE, warning = FALSE}
+#load the primary dataset from the csv file and keep only important columns with not much null values and only 'commented' event to avoid duplicates
+comments_df <- readtext::readtext("kubernetes_timeline.csv",
+                                  text_field = "body")
+
+comments_df = comments_df[,c("doc_id","text", "issue_id", "timeline_id","created_at","author_association",
+                             "event","actor_login")]
+comments_df = comments_df %>%
+  filter(.,event == "commented")
+glimpse(comments_df)
+```
+
+## Visualization of Number of Issues with Kubernetes by year
+```{r}
+v1 = issues_df %>%
+  group_by(year) %>%
+  summarise(n = n())
+ggplot(data = v1 , aes(x=year, y=n)) +
+  geom_bar(stat="identity", color="blue", fill="red") +
+  xlab ("Year") +
+  ylab ("Number of Issues")
+```
+
+```{r}
+comments_df$year = year(comments_df$created_at)
+v2 = comments_df %>%
+  group_by(year) %>%
+  summarise(n = n())
+ggplot(data = v2 , aes(x=year, y=n)) +
+  geom_bar(stat="identity", color="blue", fill="red") +
+  xlab ("Year") +
+  ylab ("Number of Comments")
+```
+
+## Discussion
+- There are 104,999 issues on Kubernetes github since it was introduced. 
+- There are more than 4 million comments on Kubernetes github since it was introduced. After selecting only 'commented' events, there are 999,312 comments. 
+- It can be seen that both datasets share the same trend: Issues count increasing from 2014 to 2016, decreasing after that. The number of issues and comments in 2017 is still high but it started decreasing a lot after that. That's why later in the project, we separated our dataset into before 2017 and after 2017. 
+
+##  Unstructured data management/analytics procedures - Secondary dataset: issues_df 
+- Create corpus and tokens
+- Keyword-in-contexts on words that we are not sure if they are meaningful or just stop words
+- Automatic detection of compound tokens
+- Constructing a document-feature matrix
+- Construct a FCM
+- Biterm Topic Model (BTM)
+
+```{r}
+# Create Corpus and tokens, remove stopwords
+issues_corp <- corpus(issues_df)
+
+issue_toks <- tokens(
+  issues_corp,
+  remove_punct = TRUE,
+  remove_numbers = TRUE,
+  remove_symbols = TRUE,
+  remove_url = TRUE,
+  split_hyphens = FALSE)
+
+myStopWords = c(stopwords("en"),'fix','kubernetes','use','error',
+          'make','automated', 'cherry' ,'pick','test','tests',
+          'issue','issues', preposition,"#\\n",'suuport','using','really','something','may',
+          'enough','to','null','true','false','fail','failed','k8s','main','please','etc',
+          'can','ready','isstd','occurred','pr','index','isutc','specifically','br','k8s.io',
+          'src','github.com','_output','info','go','n','nil','s','LGTM','lgtm','now','eventually',
+          'f','close','open','send','process','feedback','title','instructions','assign','details')
+
+toks_nostop <- tokens_remove(
+  issue_toks, pattern = myStopWords)
+toks_nostop
+```
+```{r}
+# Keyword-in-contexts on words that we are not sure if they are meaningful or just stop words.
+kw_add <- kwic(toks_nostop, pattern = "add", window = 2)
+head(kw_add)%>%
+  kbl() %>%
+  kable_styling()
+```
+```{r}
+kw_remove <- kwic(toks_nostop, pattern = "remove", window = 2)
+head(kw_remove)%>%
+  kbl() %>%
+  kable_styling()
+```
+
+It is noticeable that there are meaningful words after add and remove. So, we decided to keep add and remove. 
+
+```{r}
+#Automatic detection of compound tokens
+compound_toks <- textstat_collocations(toks_nostop, min_count = 10)
+head(compound_toks, 15)%>%
+  kbl() %>%
+  kable_styling()
+toks_comp <- tokens_compound(
+  toks_nostop, pattern = compound_toks[compound_toks$z > 100])
+```
+
+
+```{r}
+#Constructing a document-feature matrix
+issues_dfmat <- dfm(toks_comp, tolower = TRUE) %>%
+   dfm_trim(min_termfreq = 5, min_docfreq = 10)
+
+#identify top issues
+topfeatures(issues_dfmat, 20)%>%
+  kbl() %>%
+  kable_styling()
+```
+```{r message=FALSE, warning = FALSE}
+#Construct a FCM
+issues_fcmat <- fcm(issues_dfmat)
+feat <- names(topfeatures(issues_fcmat, 20))
+fcmat_select <- fcm_select(issues_fcmat, pattern = feat, selection = "keep")
+size <- log(colSums(dfm_select(issues_fcmat, feat, selection = "keep")))
+set.seed(123)
+textplot_network(fcmat_select, min_freq = 0.5, vertex_size = size/max(size)*3)
+```
+
+```{r message=FALSE, warning = FALSE}
+#BTM
+as.data.frame.tokens <- function(x) {
+  tibble(
+    doc_id = rep(names(x), lengths(x)),
+    tokens = unlist(x, use.names = FALSE)
+  )
+}
+issues_title_btm_df <- as.data.frame.tokens(toks_nostop)
+library(udpipe)
+library(BTM)
+issues_tmod_btm <- BTM(issues_title_btm_df, k = 5)
+library(textplot)
+library(ggraph)
+plot(issues_tmod_btm, top_n = 15)
+
+```
+
+
+
+## Discussions on Results of Analytics on the title dataset
+- After conducting DFM, FCM, and BTM, we identified that the key issues with Kubernetes are related to e2e, kubectl,pod,kubelet,api,cluster,volume,controller,container, scheduler,kubeadm.
+- Those issues are linked to each other. Most problems relate to e2e (End-to-end).
+- If we look at BTM of the titles, the problems can be divided into 5 main groups: Services (GCP, AWS, Cloud), Add/Remove features/components, update version/images in docker, 
+main objects (pod, e2e, container), Kubernetes API
+
+##  Unstructured data management/analytics procedures - Primary dataset: kubernetes_timeline 
+- Join Primary dataset with Secondary dataset on issue_id
+- Select only comments with the titles relating to the main issues identified above: e2e,add,update,kubelet,pod,node,cluster,api,kubeadm,gce,container,scheduler,aws,volume,docker
+- Create Corpus and tokens
+- Construct a document-feature matrix
+- Construct a FCM
+- Relative frequency analysis (keyness) (open vs closed issues, before 2017 and after 2017)
+- Correlated topic model after 2017
+- Structure topic model after 2017
+- Keyword Assisted Topic Model (Base) after 2017
+
+```{r message=FALSE, warning = FALSE}
+#Join Primary dataset with Secondary dataset on issue_id
+join <-merge(x=comments_df,y=issues_df,by="issue_id",all.x=TRUE)
+#Select only comments with the titles relating to the main issues identified above
+join_filter = dplyr::filter(join, grepl('e2e|add|update|kubelet|pod*|node*|cluster|api*|kubeadm|
+                                                  gce|container|scheduler|aws|volume|docker', text.y))
+#Create Corpus and tokens
+
+k8s_corp <- corpus(join_filter, docid_field = "timeline_id", text_field = "text.x")
+k8s_toks <- tokens(
+  k8s_corp,
+  remove_punct = TRUE,
+  remove_numbers = TRUE,
+  remove_symbols = TRUE,
+  remove_url = TRUE,
+  split_hyphens = FALSE)
+
+k8s_toks_nostop <- tokens_remove(
+  k8s_toks, pattern = myStopWords)
+#Automatic detection of compound tokens
+k8s_tstat_col <- textstat_collocations(k8s_toks_nostop, min_count = 10)
+k8s_toks_comp <- tokens_compound(
+  k8s_toks_nostop, pattern = k8s_tstat_col[k8s_tstat_col$z > 100])
+#Construct a document-feature matrix
+k8s_dfmat <- dfm(k8s_toks_comp)
+k8s_dfmat <- dfm(k8s_toks_comp, tolower = TRUE) %>%
+  dfm_trim(min_termfreq = 5, min_docfreq = 10)
+
+topfeatures(k8s_dfmat, 30)%>%
+  kbl() %>%
+  kable_styling()
+
+
+```
+
+
+```{r message=FALSE, warning = FALSE}
+#Construct a FCM
+k8s_fcmat <- fcm(k8s_dfmat)
+topfeatures(k8s_fcmat, 30)%>%
+  kbl() %>%
+  kable_styling()
+```
+
+```{r message=FALSE, warning = FALSE}
+#Relative frequency analysis (keyness) - Open vs. Closed issues
+k8s_dfmat_single <- dfm(k8s_toks_nostop, tolower = TRUE) %>%
+  dfm_trim(min_termfreq = 5, min_docfreq = 10)
+k8s_tstat_key <- textstat_keyness(
+  k8s_dfmat_single, target = k8s_dfmat_single$state == 'open')
+textplot_keyness(k8s_tstat_key, n=10, min_count = 20)
+```
+
+```{r message=FALSE, warning = FALSE}
+#Relative frequency analysis (keyness) - <= 2017 vs > 2017
+k8s_tstat_key_year <- textstat_keyness(
+  k8s_dfmat_single, target = k8s_dfmat_single$year.x > 2017)
+textplot_keyness(k8s_tstat_key_year, n=10, min_count = 20)
+```
+
+```{r, message = FALSE, warning = FALSE}
+#DFM after 2017
+combined_df_17_new <- merge(x = comments_df, y = issues_df, 
+                            by = "issue_id", all.x = TRUE) %>% 
+  filter(year.x > 2017)
+
+combined_df_17_new <- dplyr::filter(combined_df_17_new, grepl('e2e|add|update|kubelet|pod*|node*|cluster|api*|kubeadm|
+      gce|container|scheduler|aws|volume|docker', text.y))
+
+k8s_corp_new <- corpus(combined_df_17_new, docid_field = "timeline_id", text_field = "text.x")
+
+k8s_toks_new <- tokens(
+  k8s_corp_new,
+  remove_punct = TRUE,
+  remove_numbers = TRUE,
+  remove_symbols = TRUE,
+  remove_url = TRUE,
+  split_hyphens = FALSE)
+
+
+toks_nostop_17_new <- tokens_remove(
+  k8s_toks_new, pattern = myStopWords)
+
+compound_toks_17_new <- textstat_collocations(toks_nostop_17_new, min_count = 10)
+
+toks_comp_17_new <- tokens_compound(
+  toks_nostop_17_new, pattern = compound_toks_17_new[compound_toks_17_new$z > 100])
+
+k8s_dfmat_new <- dfm(k8s_toks_new, tolower = TRUE) %>%
+  dfm_remove(c(stopwords("en"), myStopWords)) %>% 
+  dfm_trim(min_termfreq = 5, min_docfreq = 10)
+topfeatures(k8s_dfmat_new, 20)%>%
+  kbl() %>%
+  kable_styling()
+```
+
+```{r message=FALSE, warning = FALSE}
+#CTM after 2017
+library(stm)
+stm_k8s_dfmat_new <- quanteda::convert(k8s_dfmat_new, to = "stm")
+
+out_new <- prepDocuments(stm_k8s_dfmat_new$documents, 
+                     stm_k8s_dfmat_new$vocab, stm_k8s_dfmat_new$meta)
+
+
+k8s_tmod_ctm_new <- stm(out_new$documents, out_new$vocab, K = 5, 
+                   seed = 123, emtol = 1e-3, 
+                   max.em.its = 2)
+
+
+plot(k8s_tmod_ctm_new, type = "summary", n = 5, labeltype = "frex", 
+     main = "K8S Topics", text.cex = 0.8)
+
+
+#Semantic coherence and exclusivity
+
+topicQuality(k8s_tmod_ctm_new, out_new$documents)
+```
+
+
+```{r message=FALSE, warning = FALSE}
+#STM after 2017
+k8s_tmob_stm_new <- stm(out_new$documents, out_new$vocab, K = 5, 
+                    prevalence = ~s(year.x), data = out_new$meta, 
+                    init.type = "Spectral", seed = 123, max.em.its = 2)
+
+plot(k8s_tmob_stm_new, type = "summary", n = 5)
+```
+
+```{r message=FALSE, warning = FALSE}
+#Semantic coherence and exclusivity
+
+topicQuality(k8s_tmob_stm_new, out_new$documents)
+```
+
+
+```{r message=FALSE, warning = FALSE}
+#Keyword Assisted Topic Model (Base) after 2017
+library(keyATM)
+keyATM_docs <- keyATM_read(texts = k8s_dfmat_new)
+
+k8s_key_list = list(
+  aws = c("volume", "service"),
+  docker = c("container", "image", "images", "node", "version"),
+  api = c("get", "server", "command", "kubectl"),
+  deployment = c("replica", "replicas", "replicated", "approval", "dockerized"),
+  lifecycle = c("pod", "pods", "time", "e2e"),
+  feature_request = c("retest", "review", "cancel", "add", "approved", "details")
+)
+
+# check topic proportion
+k8s_key_viz <- visualize_keywords(docs = keyATM_docs, keywords = k8s_key_list)
+k8s_key_viz
+```
+
+```{r message=FALSE, warning = FALSE}
+# keyatm base after 2017
+k8s_keyatm_base <- keyATM(
+  docs = keyATM_docs, # text input
+  no_keyword_topics = 3, # number of topics without keywords
+  keywords = k8s_key_list, # keywords
+  model = "base", # select the model
+  options = list(seed = 123))
+top_words(k8s_keyatm_base, 5)%>%
+  kbl() %>%
+  kable_styling()
+```
+
+
+## Summary and discussions of results
+- Top features relating to top problems: pods, dockerized_e2e , cluster, Use the Kubernetes seed provider for Cassandra Hazelcast E2E test, kubelet, node, namespace, exit status
+- Most of the above issues were fixed before 2018. There are new issues relating to replicate, lifecycle, rollout, sig-testing that have not been fixed yet. 
+- After conducting topic modeling on the comments of Kubernetes_issue_timeline pertaining to dominant issues using CTM & STM after 2017, the following conclusions were determined:
+*	Firstly, high exclusivity is observed from both CTM & STM which translates to distinct top features of the topics – Different issues have their own related comments.
+*	When comparing the topic quality in CTM & STM, the same semantic coherence and exclusivity have been noticed which states that both CTM & STM has similar performance in this case.
+* Lastly, when looking at the timelines, it is noticed that the top words across the topics during 2017 and prior are mostly related to various services and features like *Docker, Cassandra, e2e, API, pods, node, framework, clusters* whereas, the top words across the topics after 2017 are mostly generic like *approved, assign, repository, retest, send, cancel, review, request*. This can be interpreted that the issues around Kubernetes implementation with other services have come down significantly after 2017.
+- Keywords assigned to a keyword topic are suffixed with a check mark unicode. Keywords from another keyword topic are labeled with the topic id of that category. From the results, we can see that several predefined keywords appear in other topics. For example, "retest" that was defined in Topic 6 is a top keyword in Topic 3.
+- The keywords in Topic 1 are clustered like the results from the BTM model, such as the keywords services and volumes that relate to AWS. From this topic, we can conclude that when people use manage AWS services from Kubernetes, they have problems regarding the volume.
+- The keywords in Topic 6 regarding feature requests are similar to the results from the STM model using issues after 2017, which are regarding approval, cancel, comment. We can interpret that when reviewing feature requests, Kubernetes admins and approvers can comment, approve, or cancel these requests. 
+The topics without keywords are similar to the top topics found using the STM model using issues after 2017, specifically the topics mentioning test-infra and stale. It can be seen that many inactive issues are classified as stale and are rot after 30 days.  Many of these issues may relate to the test-infra component in Kubernetes.
+- When people use Kubernetes on AWS, they mostly have problems with the volumes.
+- The problems about lifecycle mostly relate to pods. 
+- Pod Priority and Preemption also need to be improved.
+- There are issues with pods, node, name, container when running Kubernetes on a Docker container.
